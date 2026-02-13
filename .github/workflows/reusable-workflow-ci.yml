@@ -1,0 +1,80 @@
+name: Reusable CI Workflow
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        required: true
+        type: string
+      languages:
+        required: false
+        type: string
+        default: '["go"]'
+    secrets: inherit
+
+jobs:
+
+  # 1) Unit Tests
+  unit_tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: ${{ fromJson(inputs.languages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Test (${{ matrix.language }})
+        run: |
+          echo "Running test for ${{ matrix.language }}"
+          # actual test command per language here
+
+  # 2) Build Image + Tag
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Tag
+        id: tag
+        run: |
+          SHA=${GITHUB_SHA::7}
+          BRANCH=$(echo "${GITHUB_REF##*/}")
+
+          if [[ "$BRANCH" == "main" ]]; then
+            TAG="prod-${SHA}"
+          else
+            TAG="dev-${SHA}"
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Build Docker
+        run: |
+          docker build -t ${{ inputs.image_name }}:${{ steps.tag.outputs.tag }} .
+
+  # 3) Trivy Scan
+  trivy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trivy Scan
+        run: |
+          docker run --rm aquasec/trivy image \
+            ${{ inputs.image_name }}:${{ needs.build.outputs.image_tag }}
+
+  # 4) Push Image
+  push:
+    needs: [unit_tests, trivy]
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ needs.build.outputs.image_tag }}
+    steps:
+      - name: Login
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" |
+          docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+
+      - name: Push Image
+        run: |
+          docker push ${{ inputs.image_name }}:${{ needs.build.outputs.image_tag }}
