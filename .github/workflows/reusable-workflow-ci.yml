@@ -226,6 +226,16 @@ jobs:
       - name: SAST gate passed
         run: echo "SAST gate cleared — CodeQL analysis passed"
 
+  # ── GROUP 3  (parallel gates, depend on group-2 + unittest) ─────────
+            
+  security-gate:
+    name: "Security Gate"
+    runs-on: self-hosted
+    needs: [unittest, trivy-scan, sast-analysis]
+    steps:
+      - name: Security gate passed
+        run: echo "Security gate cleared — Trivy scan and SAST analysis both passed"
+  
   quality-gate:
     name: "Quality Gate"
     runs-on: self-hosted
@@ -235,23 +245,13 @@ jobs:
         run: |
           echo "Quality gate cleared"
           echo "Unit tests: ${{ needs.unittest.outputs.result }}"
-          
-  # ── GROUP 3  (parallel gates, depend on group-2 + unittest) ─────────
-
-  security-gate:
-    name: "Security Gate"
-    runs-on: self-hosted
-    needs: [trivy-scan, sast-analysis]
-    steps:
-      - name: Security gate passed
-        run: echo "Security gate cleared — Trivy scan and SAST analysis both passed"
 
   # ── GROUP 4 ─────────────────────────────────────────────────────────
 
   push-image:
     name: "Push Image to GHCR"
     runs-on: self-hosted
-    needs: [security-gate, quality-gate, build]
+    needs: [security-gate, quality-gate]
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v4
