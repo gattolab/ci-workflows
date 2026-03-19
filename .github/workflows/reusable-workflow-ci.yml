@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: true
+      trivy_version:
+        description: "Trivy binary version to install (e.g. 'v0.60.0')"
+        required: false
+        type: string
+        default: "v0.60.0"
       go_version:
         description: "Go version to install on the runner (e.g. '1.22'). Required for Go projects (CodeQL + unit tests)."
         required: false
@@ -190,14 +195,28 @@ jobs:
       - name: Load Docker image
         run: docker load -i image.tar
 
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy_version }}
+        run: |
+          V="${TRIVY_VERSION#v}"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL \
+            "https://github.com/aquasecurity/trivy/releases/download/v${V}/trivy_${V}_Linux-64bit.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" trivy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          trivy --version
+
       - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.29.0
-        with:
-          image-ref: "${{ needs.build.outputs.image_name }}:${{ needs.build.outputs.image_tag }}"
-          format: table
-          exit-code: ${{ inputs.fail_on_security_issues == true && '1' || '0' }}
-          ignore-unfixed: true
-          severity: ${{ inputs.trivy_severity }}
+        run: |
+          EXIT_CODE=0
+          [[ "${{ inputs.fail_on_security_issues }}" == "true" ]] && EXIT_CODE=1
+          trivy image \
+            --exit-code  "$EXIT_CODE" \
+            --ignore-unfixed \
+            --severity   "${{ inputs.trivy_severity }}" \
+            --format     table \
+            "${{ needs.build.outputs.image_name }}:${{ needs.build.outputs.image_tag }}"
 
   sast-analysis:
     name: "② SAST Analysis"
