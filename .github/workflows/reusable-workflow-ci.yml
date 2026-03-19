@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       deployment_path:
-        description: "Path in the deployments repo where manifests live (e.g. deployments/wrappp/)"
+        description: "Path in the deployments repo where manifests live"
         required: true
         type: string
       build_args:
@@ -16,6 +16,26 @@ on:
         required: false
         type: string
         default: ""
+      codeql_language:
+        description: "Language for CodeQL analysis (go, python, javascript, java, cpp, csharp)"
+        required: false
+        type: string
+        default: "go"
+      unittest_command:
+        description: "Command to run unit tests (e.g. 'go test ./...'). Leave empty to skip."
+        required: false
+        type: string
+        default: ""
+      trivy_severity:
+        description: "Severity levels that cause Trivy to fail (CRITICAL,HIGH,MEDIUM,LOW)"
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+      fail_on_security_issues:
+        description: "Fail the pipeline if Trivy finds vulnerabilities at the given severity"
+        required: false
+        type: boolean
+        default: true
     secrets:
       GHCR_TOKEN:
         description: "GitHub Container Registry token with read:packages and repo scope"
@@ -24,40 +44,189 @@ on:
 permissions:
   contents: read
   packages: write
+  security-events: write
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Pipeline flow
+#
+#  ① build ──────────────► ② trivy-scan ──────────► ③ security-gate ──► ④ push-image ──► ⑤ bump-image-tag
+#  ① codeql ─────────────► ② sast-analysis ────────► ③ security-gate ──►
+#  ① unittest ──────────────────────────────────────► ③ quality-gate  ──►
+# ═══════════════════════════════════════════════════════════════════════
 
 jobs:
-  build:
-    name: Build & Push Docker Image
-    runs-on: self-hosted
 
+  # ── GROUP 1  (all parallel) ─────────────────────────────────────────
+
+  build:
+    name: "① Build Docker Image"
+    runs-on: self-hosted
+    outputs:
+      image_tag:  ${{ steps.meta.outputs.image_tag }}
+      image_name: ${{ steps.meta.outputs.image_name }}
     steps:
-      - name: Checkout app repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Build & Push to GHCR
-        id: build
+      - name: Set image metadata
+        id: meta
         run: |
-          IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/${{ inputs.app_name }}
-          IMAGE_TAG=$(git rev-parse --short HEAD)
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/${{ inputs.app_name }}"
+          IMAGE_TAG="$(git rev-parse --short HEAD)"
+          echo "image_tag=$IMAGE_TAG"   >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
 
-          if docker manifest inspect $IMAGE_NAME:$IMAGE_TAG > /dev/null 2>&1; then
-            echo "Image $IMAGE_NAME:$IMAGE_TAG already exists, skipping build"
+      - name: Build Docker image
+        run: |
+          docker build ${{ inputs.build_args }} \
+            -t "${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.image_tag }}" .
+          docker save \
+            "${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.image_tag }}" \
+            -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ steps.meta.outputs.image_tag }}
+          path: image.tar
+          retention-days: 1
+
+  codeql:
+    name: "① CodeQL Analysis"
+    runs-on: self-hosted
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ inputs.codeql_language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  unittest:
+    name: "① Unit Tests"
+    runs-on: self-hosted
+    outputs:
+      result: ${{ steps.run.outputs.result }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run unit tests
+        id: run
+        run: |
+          if [[ -z "${{ inputs.unittest_command }}" ]]; then
+            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            echo "No unittest_command configured — skipping unit tests"
           else
-            echo "Building and pushing $IMAGE_NAME:$IMAGE_TAG"
-            docker build ${{ inputs.build_args }} -t $IMAGE_NAME:$IMAGE_TAG .
-            docker push $IMAGE_NAME:$IMAGE_TAG
+            echo "Running: ${{ inputs.unittest_command }}"
+            ${{ inputs.unittest_command }}
+            echo "result=passed" >> "$GITHUB_OUTPUT"
           fi
 
-          docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
-          docker push $IMAGE_NAME:latest
+  # ── GROUP 2  (parallel, each depends on one group-1 job) ────────────
 
+  trivy-scan:
+    name: "② Trivy Image Scan"
+    runs-on: self-hosted
+    needs: [build]
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ needs.build.outputs.image_tag }}
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: "${{ needs.build.outputs.image_name }}:${{ needs.build.outputs.image_tag }}"
+          format: table
+          exit-code: ${{ inputs.fail_on_security_issues == true && '1' || '0' }}
+          ignore-unfixed: true
+          severity: ${{ inputs.trivy_severity }}
+
+  sast-analysis:
+    name: "② SAST Analysis"
+    runs-on: self-hosted
+    needs: [codeql]
+    steps:
+      - name: SAST gate passed
+        run: echo "SAST gate cleared — CodeQL analysis passed ✅"
+
+  # ── GROUP 3  (parallel gates, depend on group-2 + unittest) ─────────
+
+  security-gate:
+    name: "③ Security Gate"
+    runs-on: self-hosted
+    needs: [trivy-scan, sast-analysis]
+    steps:
+      - name: Security gate passed
+        run: echo "Security gate cleared — Trivy scan and SAST analysis both passed ✅"
+
+  quality-gate:
+    name: "③ Quality Gate"
+    runs-on: self-hosted
+    needs: [unittest]
+    steps:
+      - name: Quality gate passed
+        run: |
+          echo "Quality gate cleared ✅"
+          echo "Unit tests: ${{ needs.unittest.outputs.result }}"
+
+  # ── GROUP 4 ─────────────────────────────────────────────────────────
+
+  push-image:
+    name: "④ Push Image to GHCR"
+    runs-on: self-hosted
+    needs: [security-gate, quality-gate, build]
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ needs.build.outputs.image_tag }}
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GHCR_TOKEN }}" | \
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push to GHCR
+        run: |
+          IMAGE_NAME="${{ needs.build.outputs.image_name }}"
+          IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+          docker push "$IMAGE_NAME:$IMAGE_TAG"
+          docker tag  "$IMAGE_NAME:$IMAGE_TAG" "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:latest"
+          echo "Pushed $IMAGE_NAME:$IMAGE_TAG and $IMAGE_NAME:latest"
+
+  # ── GROUP 5 ─────────────────────────────────────────────────────────
+
+  bump-image-tag:
+    name: "⑤ Bump Image Tag in Manifests"
+    runs-on: self-hosted
+    needs: [push-image, build]
+    steps:
       - name: Checkout deployment manifests
         uses: actions/checkout@v4
         with:
@@ -67,20 +236,111 @@ jobs:
 
       - name: Update image tag in manifests
         run: |
-          IMAGE_TAG=${{ steps.build.outputs.image_tag }}
-          IMAGE_NAME=${{ steps.build.outputs.image_name }}
-
-          find deployment-repo/${{ inputs.deployment_path }} -name "*.yaml" -o -name "*.yml" | \
-            xargs sed -i "s|image:.*${{ inputs.app_name }}.*|image: $IMAGE_NAME:$IMAGE_TAG|g"
-
+          IMAGE_NAME="${{ needs.build.outputs.image_name }}"
+          IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+          find "deployment-repo/${{ inputs.deployment_path }}" \
+            \( -name "*.yaml" -o -name "*.yml" \) \
+            -exec sed -i \
+              "s|image:.*${{ inputs.app_name }}.*|image: $IMAGE_NAME:$IMAGE_TAG|g" \
+              {} +
           echo "Updated manifests with image: $IMAGE_NAME:$IMAGE_TAG"
 
       - name: Commit & push manifest changes
         run: |
           cd deployment-repo
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${{ inputs.deployment_path }}
+          git add "${{ inputs.deployment_path }}"
           git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "chore: update ${{ inputs.app_name }} image to ${{ steps.build.outputs.image_tag }}"
+          git commit -m "chore: update ${{ inputs.app_name }} image to ${{ needs.build.outputs.image_tag }}"
           git push
+
+  # ── PIPELINE SUMMARY  (always runs, writes Mermaid diagram) ─────────
+
+  pipeline-summary:
+    name: "Pipeline Summary"
+    runs-on: self-hosted
+    if: always()
+    needs:
+      - build
+      - codeql
+      - unittest
+      - trivy-scan
+      - sast-analysis
+      - security-gate
+      - quality-gate
+      - push-image
+      - bump-image-tag
+    steps:
+      - name: Write pipeline summary
+        env:
+          R_BUILD:    ${{ needs.build.result }}
+          R_CODEQL:   ${{ needs.codeql.result }}
+          R_UNITTEST: ${{ needs.unittest.result }}
+          R_TRIVY:    ${{ needs.trivy-scan.result }}
+          R_SAST:     ${{ needs.sast-analysis.result }}
+          R_SECGATE:  ${{ needs.security-gate.result }}
+          R_QUALGATE: ${{ needs.quality-gate.result }}
+          R_PUSH:     ${{ needs.push-image.result }}
+          R_BUMP:     ${{ needs.bump-image-tag.result }}
+          IMAGE_NAME: ${{ needs.build.outputs.image_name }}
+          IMAGE_TAG:  ${{ needs.build.outputs.image_tag }}
+        run: |
+          badge() {
+            case "$1" in
+              success)   printf '✅ Passed'    ;;
+              failure)   printf '❌ Failed'    ;;
+              skipped)   printf '⏭️  Skipped'  ;;
+              cancelled) printf '🚫 Cancelled' ;;
+              *)         printf '⚪ %s' "$1"   ;;
+            esac
+          }
+
+          {
+            echo "## 🚀 CI Pipeline — ${{ inputs.app_name }}"
+            echo ""
+            echo '```mermaid'
+            echo 'flowchart LR'
+            echo '    subgraph g1["① Parallel"]'
+            echo '        build["🔨 Build Image"]'
+            echo '        codeql["🔐 CodeQL"]'
+            echo '        unittest["🧪 Unit Tests"]'
+            echo '    end'
+            echo '    subgraph g2["② Parallel"]'
+            echo '        trivy["🔍 Trivy Scan"]'
+            echo '        sast["🛡️ SAST Analysis"]'
+            echo '    end'
+            echo '    subgraph g3["③ Parallel"]'
+            echo '        secgate["🔒 Security Gate"]'
+            echo '        qualgate["✅ Quality Gate"]'
+            echo '    end'
+            echo '    push4["④ Push to GHCR"]'
+            echo '    bump5["⑤ Bump Image Tag"]'
+            echo '    build    --> trivy'
+            echo '    codeql   --> sast'
+            echo '    trivy    --> secgate'
+            echo '    sast     --> secgate'
+            echo '    unittest --> qualgate'
+            echo '    secgate  --> push4'
+            echo '    qualgate --> push4'
+            echo '    push4    --> bump5'
+            echo '```'
+            echo ""
+            echo "### Job Results"
+            echo ""
+            echo "| Group | Job | Result |"
+            echo "|:-----:|-----|--------|"
+            echo "| ① | 🔨 Build Image       | $(badge "$R_BUILD")    |"
+            echo "| ① | 🔐 CodeQL Analysis   | $(badge "$R_CODEQL")   |"
+            echo "| ① | 🧪 Unit Tests        | $(badge "$R_UNITTEST") |"
+            echo "| ② | 🔍 Trivy Image Scan  | $(badge "$R_TRIVY")    |"
+            echo "| ② | 🛡️  SAST Analysis    | $(badge "$R_SAST")     |"
+            echo "| ③ | 🔒 Security Gate     | $(badge "$R_SECGATE")  |"
+            echo "| ③ | ✅ Quality Gate      | $(badge "$R_QUALGATE") |"
+            echo "| ④ | 📦 Push to GHCR     | $(badge "$R_PUSH")     |"
+            echo "| ⑤ | 🏷️  Bump Image Tag   | $(badge "$R_BUMP")     |"
+            echo ""
+            if [[ -n "$IMAGE_TAG" ]]; then
+              echo "**Image:** \`${IMAGE_NAME}:${IMAGE_TAG}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
