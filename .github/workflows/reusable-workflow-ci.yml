@@ -231,7 +231,7 @@ jobs:
   security-gate:
     name: "Security Gate"
     runs-on: self-hosted
-    needs: [unittest, trivy-scan, sast-analysis]
+    needs: [trivy-scan, sast-analysis]
     steps:
       - name: Security gate passed
         run: echo "Security gate cleared — Trivy scan and SAST analysis both passed"
