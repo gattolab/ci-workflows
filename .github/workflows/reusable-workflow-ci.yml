@@ -291,21 +291,30 @@ jobs:
 
       - name: Update image tag in manifests
         run: |
-          IMAGE_NAME="${{ needs.build.outputs.image_name }}"
           IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
-          find "deployment-repo/${{ inputs.deployment_path }}" \
-            \( -name "*.yaml" -o -name "*.yml" \) \
-            -exec sed -i \
-              "s|image:.*${{ inputs.app_name }}.*|image: $IMAGE_NAME:$IMAGE_TAG|g" \
-              {} +
-          echo "Updated manifests with image: $IMAGE_NAME:$IMAGE_TAG"
+          VALUES_FILE="deployment-repo/apps/${{ inputs.app_name }}/values.yaml"
+
+          if [[ ! -f "$VALUES_FILE" ]]; then
+            echo "::error::values file not found: $VALUES_FILE"
+            exit 1
+          fi
+
+          # Install yq if not present
+          if ! command -v yq &>/dev/null; then
+            curl -sSfL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+              -o "$HOME/.local/bin/yq" && chmod +x "$HOME/.local/bin/yq"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+          yq -i ".image.tag = \"$IMAGE_TAG\"" "$VALUES_FILE"
+          echo "Updated $VALUES_FILE → image.tag: $IMAGE_TAG"
 
       - name: Commit & push manifest changes
         run: |
           cd deployment-repo
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ inputs.deployment_path }}"
+          git add "apps/${{ inputs.app_name }}/values.yaml"
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore: update ${{ inputs.app_name }} image to ${{ needs.build.outputs.image_tag }}"
           git push
