@@ -251,7 +251,7 @@ jobs:
   push-image:
     name: "Push Image to GHCR"
     runs-on: self-hosted
-    needs: [security-gate, quality-gate]
+    needs: [build, security-gate, quality-gate]
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v4
