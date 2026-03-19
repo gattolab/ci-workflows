@@ -72,7 +72,7 @@ jobs:
   # ── GROUP 1  (all parallel) ─────────────────────────────────────────
 
   build:
-    name: "① Build Docker Image"
+    name: "Build Docker Image"
     runs-on: self-hosted
     outputs:
       image_tag:  ${{ steps.meta.outputs.image_tag }}
@@ -107,7 +107,7 @@ jobs:
           retention-days: 1
 
   codeql:
-    name: "① CodeQL Analysis"
+    name: "CodeQL Analysis"
     runs-on: self-hosted
     permissions:
       security-events: write
@@ -144,7 +144,7 @@ jobs:
         uses: github/codeql-action/analyze@v4
 
   unittest:
-    name: "① Unit Tests"
+    name: "Unit Tests"
     runs-on: self-hosted
     outputs:
       result: ${{ steps.run.outputs.result }}
@@ -183,7 +183,7 @@ jobs:
   # ── GROUP 2  (parallel, each depends on one group-1 job) ────────────
 
   trivy-scan:
-    name: "② Trivy Image Scan"
+    name: "Trivy Image Scan"
     runs-on: self-hosted
     needs: [build]
     steps:
@@ -219,37 +219,37 @@ jobs:
             "${{ needs.build.outputs.image_name }}:${{ needs.build.outputs.image_tag }}"
 
   sast-analysis:
-    name: "② SAST Analysis"
+    name: "SAST Analysis"
     runs-on: self-hosted
     needs: [codeql]
     steps:
       - name: SAST gate passed
-        run: echo "SAST gate cleared — CodeQL analysis passed ✅"
+        run: echo "SAST gate cleared — CodeQL analysis passed"
 
   # ── GROUP 3  (parallel gates, depend on group-2 + unittest) ─────────
 
   security-gate:
-    name: "③ Security Gate"
+    name: "Security Gate"
     runs-on: self-hosted
     needs: [trivy-scan, sast-analysis]
     steps:
       - name: Security gate passed
-        run: echo "Security gate cleared — Trivy scan and SAST analysis both passed ✅"
+        run: echo "Security gate cleared — Trivy scan and SAST analysis both passed"
 
   quality-gate:
-    name: "③ Quality Gate"
+    name: "Quality Gate"
     runs-on: self-hosted
     needs: [unittest]
     steps:
       - name: Quality gate passed
         run: |
-          echo "Quality gate cleared ✅"
+          echo "Quality gate cleared"
           echo "Unit tests: ${{ needs.unittest.outputs.result }}"
 
   # ── GROUP 4 ─────────────────────────────────────────────────────────
 
   push-image:
-    name: "④ Push Image to GHCR"
+    name: "Push Image to GHCR"
     runs-on: self-hosted
     needs: [security-gate, quality-gate, build]
     steps:
@@ -278,7 +278,7 @@ jobs:
   # ── GROUP 5 ─────────────────────────────────────────────────────────
 
   bump-image-tag:
-    name: "⑤ Bump Image Tag in Manifests"
+    name: "Bump Image Tag in Manifests"
     runs-on: self-hosted
     needs: [push-image, build]
     steps:
@@ -343,57 +343,31 @@ jobs:
         run: |
           badge() {
             case "$1" in
-              success)   printf '✅ Passed'    ;;
-              failure)   printf '❌ Failed'    ;;
-              skipped)   printf '⏭️  Skipped'  ;;
-              cancelled) printf '🚫 Cancelled' ;;
-              *)         printf '⚪ %s' "$1"   ;;
+              success)   printf 'Passed'    ;;
+              failure)   printf 'Failed'    ;;
+              skipped)   printf 'Skipped'   ;;
+              cancelled) printf 'Cancelled' ;;
+              *)         printf '%s' "$1"   ;;
             esac
           }
 
           {
             echo "## 🚀 CI Pipeline — ${{ inputs.app_name }}"
             echo ""
-            echo '```mermaid'
-            echo 'flowchart LR'
-            echo '    subgraph g1["① Parallel"]'
-            echo '        build["🔨 Build Image"]'
-            echo '        codeql["🔐 CodeQL"]'
-            echo '        unittest["🧪 Unit Tests"]'
-            echo '    end'
-            echo '    subgraph g2["② Parallel"]'
-            echo '        trivy["🔍 Trivy Scan"]'
-            echo '        sast["🛡️ SAST Analysis"]'
-            echo '    end'
-            echo '    subgraph g3["③ Parallel"]'
-            echo '        secgate["🔒 Security Gate"]'
-            echo '        qualgate["✅ Quality Gate"]'
-            echo '    end'
-            echo '    push4["④ Push to GHCR"]'
-            echo '    bump5["⑤ Bump Image Tag"]'
-            echo '    build    --> trivy'
-            echo '    codeql   --> sast'
-            echo '    trivy    --> secgate'
-            echo '    sast     --> secgate'
-            echo '    unittest --> qualgate'
-            echo '    secgate  --> push4'
-            echo '    qualgate --> push4'
-            echo '    push4    --> bump5'
-            echo '```'
             echo ""
             echo "### Job Results"
             echo ""
             echo "| Group | Job | Result |"
             echo "|:-----:|-----|--------|"
-            echo "| ① | 🔨 Build Image       | $(badge "$R_BUILD")    |"
-            echo "| ① | 🔐 CodeQL Analysis   | $(badge "$R_CODEQL")   |"
-            echo "| ① | 🧪 Unit Tests        | $(badge "$R_UNITTEST") |"
-            echo "| ② | 🔍 Trivy Image Scan  | $(badge "$R_TRIVY")    |"
-            echo "| ② | 🛡️  SAST Analysis    | $(badge "$R_SAST")     |"
-            echo "| ③ | 🔒 Security Gate     | $(badge "$R_SECGATE")  |"
-            echo "| ③ | ✅ Quality Gate      | $(badge "$R_QUALGATE") |"
-            echo "| ④ | 📦 Push to GHCR     | $(badge "$R_PUSH")     |"
-            echo "| ⑤ | 🏷️  Bump Image Tag   | $(badge "$R_BUMP")     |"
+            echo "| 1 | Build Image       | $(badge "$R_BUILD")    |"
+            echo "| 1 | CodeQL Analysis   | $(badge "$R_CODEQL")   |"
+            echo "| 1 | Unit Tests        | $(badge "$R_UNITTEST") |"
+            echo "| 2 | Trivy Image Scan  | $(badge "$R_TRIVY")    |"
+            echo "| 2 | SAST Analysis     | $(badge "$R_SAST")     |"
+            echo "| 3 | Security Gate     | $(badge "$R_SECGATE")  |"
+            echo "| 3 | Quality Gate      | $(badge "$R_QUALGATE") |"
+            echo "| 4 | Push to GHCR      | $(badge "$R_PUSH")     |"
+            echo "| 5 | Bump Image Tag    | $(badge "$R_BUMP")     |"
             echo ""
             if [[ -n "$IMAGE_TAG" ]]; then
               echo "**Image:** \`${IMAGE_NAME}:${IMAGE_TAG}\`"
