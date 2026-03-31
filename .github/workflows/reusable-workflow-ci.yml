@@ -132,6 +132,13 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Setup Node.js (required for JavaScript/TypeScript CodeQL extraction)
+        if: inputs.codeql_language == 'javascript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: false
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
