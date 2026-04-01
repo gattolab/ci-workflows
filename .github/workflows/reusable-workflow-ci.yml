@@ -313,6 +313,7 @@ jobs:
           fi
 
           yq -i ".image.tag = \"$IMAGE_TAG\"" "$VALUES_FILE"
+          yq -i ".git.revision = \"$IMAGE_TAG\"" "$VALUES_FILE"
           echo "Updated $VALUES_FILE → image.tag: $IMAGE_TAG"
 
       - name: Commit & push manifest changes
